@@ -38,6 +38,7 @@ use OCA\Onlyoffice\FileUtility;
 use OCA\Onlyoffice\KeyManager;
 use OCA\Onlyoffice\RemoteInstance;
 use OCA\Onlyoffice\TemplateManager;
+use OCP\App\IAppManager;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\DataDownloadResponse;
@@ -76,74 +77,11 @@ use Psr\Log\LoggerInterface;
 class CallbackController extends Controller {
 
     /**
-     * Root folder
-     *
-     * @var IRootFolder
-     */
-    private $root;
-
-    /**
-     * User session
-     *
-     * @var IUserSession
-     */
-    private $userSession;
-
-    /**
-     * User manager
-     *
-     * @var IUserManager
-     */
-    private $userManager;
-
-    /**
-     * l10n service
-     *
-     * @var IL10N
-     */
-    private $trans;
-
-    /**
-     * Logger
-     *
-     * @var LoggerInterface
-     */
-    private $logger;
-
-    /**
-     * Application configuration
-     *
-     * @var AppConfig
-     */
-    private $config;
-
-    /**
-     * Hash generator
-     *
-     * @var Crypt
-     */
-    private $crypt;
-
-    /**
-     * Share manager
-     *
-     * @var IManager
-     */
-    private $shareManager;
-
-    /**
      * File version manager
      *
      * @var IVersionManager
      */
     private $versionManager;
-
-    /**
-     * Lock manager
-     *
-     * @var ILockManager
-     */
-    private $lockManager;
 
     /**
      * Status of the document
@@ -155,45 +93,23 @@ class CallbackController extends Controller {
     private const TRACKERSTATUS_FORCESAVE = 6;
     private const TRACKERSTATUS_CORRUPTEDFORCESAVE = 7;
 
-    /**
-     * @param string $AppName - application name
-     * @param IRequest $request - request object
-     * @param IRootFolder $root - root folder
-     * @param IUserSession $userSession - current user session
-     * @param IUserManager $userManager - user manager
-     * @param IL10N $trans - l10n service
-     * @param LoggerInterface $logger - logger
-     * @param AppConfig $config - application configuration
-     * @param Crypt $crypt - hash generator
-     * @param IManager $shareManager - Share manager
-     * @param ILockManager $lockManager - Lock manager
-     */
     public function __construct(
-        $AppName,
+        string $AppName,
         IRequest $request,
-        IRootFolder $root,
-        IUserSession $userSession,
-        IUserManager $userManager,
-        IL10N $trans,
-        LoggerInterface $logger,
-        AppConfig $config,
-        Crypt $crypt,
-        IManager $shareManager,
-        ILockManager $lockManager
+        private IRootFolder $root,
+        private IUserSession $userSession,
+        private IUserManager $userManager,
+        private IL10N $trans,
+        private LoggerInterface $logger,
+        private AppConfig $config,
+        private Crypt $crypt,
+        private IManager $shareManager,
+        private ILockManager $lockManager,
+        private IAppManager $appManager,
     ) {
         parent::__construct($AppName, $request);
 
-        $this->root = $root;
-        $this->userSession = $userSession;
-        $this->userManager = $userManager;
-        $this->trans = $trans;
-        $this->logger = $logger;
-        $this->config = $config;
-        $this->crypt = $crypt;
-        $this->shareManager = $shareManager;
-        $this->lockManager = $lockManager;
-
-        if (\OC::$server->getAppManager()->isInstalled("files_versions")) {
+        if ($this->appManager->isEnabledForUser('files_versions')) {
             try {
                 $this->versionManager = \OC::$server->query(IVersionManager::class);
             } catch (QueryException $e) {
@@ -201,7 +117,6 @@ class CallbackController extends Controller {
             }
         }
     }
-
 
     /**
      * Downloading file by the document service
@@ -227,13 +142,13 @@ class CallbackController extends Controller {
         }
 
         $fileId = $hashData->fileId;
-        $version = isset($hashData->version) ? $hashData->version : null;
-        $changes = isset($hashData->changes) ? $hashData->changes : false;
-        $template = isset($hashData->template) ? $hashData->template : false;
+        $version = $hashData->version ?? null;
+        $changes = $hashData->changes ?? false;
+        $template = $hashData->template ?? false;
         $this->logger->debug("Download: $fileId ($version)" . ($changes ? " changes" : ""));
 
         if (!empty($this->config->getDocumentServerSecret())) {
-            $header = \OC::$server->getRequest()->getHeader($this->config->jwtHeader());
+            $header = $this->request->getHeader($this->config->jwtHeader());
             if (empty($header)) {
                 $this->logger->error("Download without jwt");
                 return new JSONResponse(["message" => $this->trans->t("Access denied")], Http::STATUS_FORBIDDEN);
@@ -319,7 +234,6 @@ class CallbackController extends Controller {
                 $versionId = $file->getFileInfo()->getMtime();
             } else {
                 $fileVersion = array_values($versions)[$version - 1];
-
                 $versionId = $fileVersion->getRevisionId();
             }
 
@@ -369,7 +283,7 @@ class CallbackController extends Controller {
         }
 
         if (!empty($this->config->getDocumentServerSecret())) {
-            $header = \OC::$server->getRequest()->getHeader($this->config->jwtHeader());
+            $header = $this->request->getHeader($this->config->jwtHeader());
             if (empty($header)) {
                 $this->logger->error("Download empty without jwt");
                 return new JSONResponse(["message" => $this->trans->t("Access denied")], Http::STATUS_FORBIDDEN);
@@ -447,7 +361,7 @@ class CallbackController extends Controller {
                     return new JSONResponse(["message" => $this->trans->t("Access denied")], Http::STATUS_FORBIDDEN);
                 }
             } else {
-                $header = \OC::$server->getRequest()->getHeader($this->config->jwtHeader());
+                $header = $this->request->getHeader($this->config->jwtHeader());
                 if (empty($header)) {
                     $this->logger->error("Track without jwt");
                     return new JSONResponse(["message" => $this->trans->t("Access denied")], Http::STATUS_FORBIDDEN);
@@ -457,7 +371,6 @@ class CallbackController extends Controller {
 
                 try {
                     $decodedHeader = \Firebase\JWT\JWT::decode($header, new \Firebase\JWT\Key($this->config->getDocumentServerSecret(), "HS256"));
-
                     $payload = $decodedHeader->payload;
                 } catch (\UnexpectedValueException $e) {
                     $this->logger->error("Track with invalid jwt", ["exception" => $e]);
